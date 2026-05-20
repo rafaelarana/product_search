@@ -37,6 +37,24 @@ def embed_query(text: str) -> list[float]:
     return list(emb)
 
 
+def batch_embed(texts: list[str]) -> list[list[float]]:
+    """Embed many queries in a single Model Serving call.
+
+    Used by the preload step at startup so we don't pay 100 round-trip costs.
+    """
+    if not texts:
+        return []
+    resp = _workspace.serving_endpoints.query(
+        name=settings.SERVING_ENDPOINT_EMBEDDING,
+        input=texts,
+    )
+    out: list[list[float]] = []
+    for elt in resp.data:
+        emb = elt.embedding if hasattr(elt, "embedding") else elt["embedding"]
+        out.append(list(emb))
+    return out
+
+
 class _EmbedCache:
     """Thread-safe LRU cache keyed by normalized query text.
 
@@ -86,6 +104,24 @@ class _EmbedCache:
                 if len(self._cache) > self.maxsize:
                     self._cache.popitem(last=False)
             return vec, False
+
+    def preload(self, queries: list[str], vectors: list[list[float]]) -> int:
+        """Insert pre-computed (query, vector) pairs from a batch embed call.
+
+        Returns the number of new entries inserted (does not overwrite hits).
+        """
+        n = 0
+        with self._lock:
+            for q, vec in zip(queries, vectors):
+                key = self._normalize(q)
+                if key in self._cache:
+                    continue
+                self._cache[key] = vec
+                self._cache.move_to_end(key)
+                if len(self._cache) > self.maxsize:
+                    self._cache.popitem(last=False)
+                n += 1
+        return n
 
     def stats(self) -> dict[str, int]:
         with self._lock:

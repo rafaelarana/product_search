@@ -180,11 +180,20 @@ export default function SearchPage({ mode }: Props) {
 
       {/* Cache stats (Turbo only) */}
       {mode === 'turbo' && cacheStats && (
-        <div className="max-w-3xl mx-auto mt-4 text-center text-xs text-ink-400 font-mono">
-          embed cache · size {cacheStats.size}/{cacheStats.maxsize} · hits{' '}
-          <span className="text-lime">{cacheStats.hits}</span> · misses{' '}
-          <span className="text-ink-200">{cacheStats.misses}</span> · ratio{' '}
-          <span className="text-lime">{cacheStats.hit_ratio_pct}%</span>
+        <div className="max-w-3xl mx-auto mt-4 text-center text-xs text-ink-400 font-mono space-y-1">
+          <div>
+            embed cache · size {cacheStats.embed.size}/{cacheStats.embed.maxsize} · hits{' '}
+            <span className="text-lime">{cacheStats.embed.hits}</span> · misses{' '}
+            <span className="text-ink-200">{cacheStats.embed.misses}</span> · ratio{' '}
+            <span className="text-lime">{cacheStats.embed.hit_ratio_pct}%</span>
+          </div>
+          <div>
+            result cache · {cacheStats.result.ready ? 'ready' : 'warming…'} · preloaded{' '}
+            <span className="text-lime">{cacheStats.result.preloaded}</span> · hits{' '}
+            <span className="text-lime">{cacheStats.result.hits}</span> · misses{' '}
+            <span className="text-ink-200">{cacheStats.result.misses}</span> · ratio{' '}
+            <span className="text-lime">{cacheStats.result.hit_ratio_pct}%</span>
+          </div>
         </div>
       )}
 
@@ -216,6 +225,7 @@ export default function SearchPage({ mode }: Props) {
               db_ms={result.db_ms}
               total_ms={result.total_ms}
               cache_hit={result.cache_hit}
+              cache_layer={result.cache_layer}
             />
           </div>
 

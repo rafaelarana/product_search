@@ -52,9 +52,20 @@ class OAuthConnection(psycopg.Connection):
 
 
 def _configure(conn: psycopg.Connection) -> None:
-    """Per-connection setup: register pgvector type, dict row factory."""
+    """Per-connection setup: register pgvector type, dict row factory, tune
+    HNSW ef_search per session (lower = faster, slightly lower recall).
+
+    The SET runs in autocommit so it's session-scoped AND the connection ends
+    in IDLE state — without autocommit psycopg's pool sees the conn stuck in
+    INTRANS and discards it (pool never warms, lifespan times out)."""
     register_vector(conn)
     conn.row_factory = dict_row
+    prev_autocommit = conn.autocommit
+    conn.autocommit = True
+    try:
+        conn.execute("SET hnsw.ef_search = 20")
+    finally:
+        conn.autocommit = prev_autocommit
 
 
 pool: ConnectionPool = ConnectionPool(

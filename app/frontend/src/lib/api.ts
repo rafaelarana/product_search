@@ -15,6 +15,7 @@ export interface SearchResponse {
   total_ms: number;
   mode: 'semantic' | 'hybrid';
   cache_hit?: boolean;
+  cache_layer?: 'none' | 'embed' | 'result';
 }
 
 export interface ProductDetail {
@@ -92,12 +93,27 @@ export async function listClasses(): Promise<ClassFacet[]> {
   return res.json();
 }
 
-export interface CacheStats {
+export interface EmbedCacheStats {
   size: number;
   maxsize: number;
   hits: number;
   misses: number;
   hit_ratio_pct: number;
+}
+
+export interface ResultCacheStats {
+  size: number;
+  maxsize: number;
+  hits: number;
+  misses: number;
+  hit_ratio_pct: number;
+  preloaded: number;
+  ready: boolean;
+}
+
+export interface CacheStats {
+  embed: EmbedCacheStats;
+  result: ResultCacheStats;
 }
 
 export async function getCacheStats(): Promise<CacheStats> {

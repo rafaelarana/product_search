@@ -9,6 +9,7 @@ Two parallel API surfaces:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -19,10 +20,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .embed import embed_cache, embed_query, embed_query_cached
+from .embed import batch_embed, embed_cache, embed_query, embed_query_cached
 from .lakebase import pool
 from . import loadgen
-from .loadgen import BenchmarkConfig, BenchmarkStatus
+from .loadgen import BenchmarkConfig, BenchmarkStatus, SAMPLE_QUERIES
+from .result_cache import result_cache
 
 log = logging.getLogger("product_recommender")
 logging.basicConfig(level=logging.INFO)
@@ -32,9 +34,55 @@ logging.basicConfig(level=logging.INFO)
 async def lifespan(app: FastAPI):  # noqa: ARG001
     pool.open()
     pool.wait()
-    log.info("Lakebase pool opened")
+    log.info("Lakebase pool opened (min=%d, max=%d)", pool.min_size, pool.max_size)
+    # Kick off the cache pre-warm in the background so we serve traffic
+    # immediately; hot queries become fast as the preload progresses.
+    asyncio.create_task(_preload_caches())
     yield
     pool.close()
+
+
+def _seed_query_ids(query: str, vec: list[float], mode: str, limit: int = 20) -> list[tuple[int, float]]:
+    """Run the live search SQL once to compute the seed entry for a query."""
+    with pool.connection() as conn, conn.cursor() as cur:
+        if mode == "hybrid":
+            cur.execute(
+                "SELECT product_id, combined_score FROM "
+                "search_products_hybrid(%s, %s::vector(1024), %s, %s)",
+                [query, vec, None, limit],
+            )
+            return [(r["product_id"], float(r["combined_score"])) for r in cur.fetchall()]
+        cur.execute(
+            "SELECT product_id, similarity FROM "
+            "search_products_semantic(%s::vector(1024), %s, %s)",
+            [vec, None, limit],
+        )
+        return [(r["product_id"], float(r["similarity"])) for r in cur.fetchall()]
+
+
+async def _preload_caches() -> None:
+    """One-shot preload: batch-embed the seed queries, populate both caches."""
+    t0 = time.perf_counter()
+    queries = SAMPLE_QUERIES
+    try:
+        # 1. One Model Serving call for all seed queries.
+        vecs = await asyncio.to_thread(batch_embed, queries)
+        n_embed = embed_cache.preload(queries, vecs)
+        log.info("preload: embed cache +%d (%.2fs)", n_embed, time.perf_counter() - t0)
+
+        # 2. Compute and cache result IDs for each (query, mode) — no class filter.
+        for q, vec in zip(queries, vecs):
+            for mode in ("semantic", "hybrid"):
+                try:
+                    ids = await asyncio.to_thread(_seed_query_ids, q, vec, mode)
+                    result_cache.put_preloaded(q, mode, None, ids)
+                except Exception:  # pragma: no cover
+                    log.exception("preload entry failed (q=%r mode=%s)", q, mode)
+        result_cache.mark_ready()
+        log.info("preload: result cache ready, %d entries (%.2fs total)",
+                 result_cache.stats()["preloaded"], time.perf_counter() - t0)
+    except Exception:  # pragma: no cover
+        log.exception("preload failed")
 
 
 app = FastAPI(title="Lumen", lifespan=lifespan)
@@ -66,7 +114,8 @@ class SearchResponse(BaseModel):
     db_ms: int
     total_ms: int
     mode: str
-    cache_hit: bool = False  # only set by Turbo mode
+    cache_hit: bool = False  # set by Turbo when ANY cache layer helped
+    cache_layer: str = "none"  # one of: "none", "embed", "result"
 
 
 class ProductDetail(BaseModel):
@@ -127,9 +176,12 @@ def healthz() -> dict[str, str]:
 
 
 @app.get("/api/cache/stats")
-def cache_stats() -> dict[str, int]:
-    """Embedding-cache hit/miss counters (Turbo mode visibility)."""
-    return embed_cache.stats()
+def cache_stats() -> dict[str, object]:
+    """Cache hit/miss counters for both Turbo layers."""
+    return {
+        "embed": embed_cache.stats(),
+        "result": result_cache.stats(),
+    }
 
 
 @app.get("/api/classes", response_model=list[ClassFacet])
@@ -201,17 +253,73 @@ def similar(product_id: int, limit: int = 8, same_class: bool = False) -> list[S
 # --- Turbo mode -------------------------------------------------------------
 
 
+def _hits_from_cached(ids_and_scores: list[tuple[int, float]], limit: int, cur) -> list[SearchHit]:
+    """Resolve cached (id, score) pairs into SearchHit rows via a single PK
+    lookup against products_mv, preserving rank order."""
+    ids = [i for i, _ in ids_and_scores[:limit]]
+    if not ids:
+        return []
+    score_by_id = {i: s for i, s in ids_and_scores[:limit]}
+    cur.execute(
+        """
+        SELECT product_id, product_name, product_class, category_hierarchy,
+               average_rating, review_count
+        FROM lumen_gold.products_mv
+        WHERE product_id = ANY(%s)
+        """,
+        [ids],
+    )
+    rows_by_id = {r["product_id"]: r for r in cur.fetchall()}
+    out: list[SearchHit] = []
+    for pid in ids:
+        r = rows_by_id.get(pid)
+        if r is None:
+            continue
+        out.append(
+            SearchHit(
+                product_id=r["product_id"],
+                product_name=r["product_name"],
+                product_class=r.get("product_class"),
+                category_hierarchy=r.get("category_hierarchy"),
+                average_rating=r.get("average_rating"),
+                review_count=r.get("review_count"),
+                score=score_by_id[pid],
+            )
+        )
+    return out
+
+
 @app.post("/api/search/fast", response_model=SearchResponse)
 def search_fast(req: SearchRequest) -> SearchResponse:
-    """Same as /api/search but uses the LRU embedding cache.
+    """Turbo path. Layered cache:
 
-    First call for a given normalized query string still hits Model Serving;
-    every subsequent call returns instantly from in-memory cache.
+    1. result cache  → (query, mode, class) → [(id, score)]: pure PK lookup
+    2. embed cache   → query → vector: skip Model Serving, still HNSW
+    3. fall through  → Model Serving + HNSW (cold path)
     """
     t_start = time.perf_counter()
 
+    # Layer 1: result cache (only for the no-class-filter case at present).
+    if req.product_class is None:
+        cached = result_cache.get(req.q, req.mode, None)
+        if cached is not None:
+            t_db = time.perf_counter()
+            with pool.connection() as conn, conn.cursor() as cur:
+                hits = _hits_from_cached(cached, req.limit, cur)
+            db_ms = int((time.perf_counter() - t_db) * 1000)
+            return SearchResponse(
+                hits=hits,
+                embed_ms=0,
+                db_ms=db_ms,
+                total_ms=int((time.perf_counter() - t_start) * 1000),
+                mode=req.mode,
+                cache_hit=True,
+                cache_layer="result",
+            )
+
+    # Layer 2: embedding cache.
     t_embed = time.perf_counter()
-    qvec, cache_hit = embed_query_cached(req.q)
+    qvec, embed_hit = embed_query_cached(req.q)
     embed_ms = int((time.perf_counter() - t_embed) * 1000)
 
     t_db = time.perf_counter()
@@ -225,7 +333,8 @@ def search_fast(req: SearchRequest) -> SearchResponse:
         db_ms=db_ms,
         total_ms=int((time.perf_counter() - t_start) * 1000),
         mode=req.mode,
-        cache_hit=cache_hit,
+        cache_hit=embed_hit,
+        cache_layer="embed" if embed_hit else "none",
     )
 
 
