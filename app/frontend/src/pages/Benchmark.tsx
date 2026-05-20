@@ -4,7 +4,9 @@ import {
   BenchmarkStatus,
   BucketStats,
   getBenchmarkStatus,
+  getCurrentBenchmark,
   startBenchmark,
+  stopBenchmark,
 } from '../lib/api';
 
 const DEFAULT_CFG: BenchmarkConfig = {
@@ -21,9 +23,24 @@ export default function BenchmarkPage() {
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
 
-  // Stop polling when component unmounts.
-  useEffect(() => () => {
-    if (pollRef.current) clearInterval(pollRef.current);
+  // Stop polling when component unmounts; pick up any in-flight job on mount.
+  useEffect(() => {
+    (async () => {
+      try {
+        const { job_id } = await getCurrentBenchmark();
+        if (job_id) {
+          const s = await getBenchmarkStatus(job_id);
+          setStatus(s);
+          if (s.state === 'running') startPolling(job_id);
+        }
+      } catch {
+        /* no-op */
+      }
+    })();
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function startPolling(jobId: string) {
@@ -49,6 +66,18 @@ export default function BenchmarkPage() {
     try {
       const { job_id } = await startBenchmark(cfg);
       startPolling(job_id);
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    }
+  }
+
+  async function onStop() {
+    if (!status?.job_id) return;
+    try {
+      const s = await stopBenchmark(status.job_id);
+      setStatus(s);
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = null;
     } catch (e: any) {
       setError(e.message ?? String(e));
     }
@@ -116,14 +145,24 @@ export default function BenchmarkPage() {
           max={100}
           hint="rest is semantic"
         />
-        <div className="flex items-end justify-end col-span-2 sm:col-span-1">
+        <div className="flex items-end gap-2 col-span-2 sm:col-span-1">
           <button
             type="submit"
             disabled={running}
-            className="w-full px-5 py-2.5 bg-lime hover:opacity-90 disabled:opacity-40 transition rounded-xl font-medium text-ink-900"
+            className="flex-1 px-5 py-2.5 bg-lime hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition rounded-xl font-medium text-ink-900"
           >
             {running ? `Running ${status?.elapsed_s?.toFixed?.(1) ?? 0}s…` : '▶ Run benchmark'}
           </button>
+          {running && (
+            <button
+              type="button"
+              onClick={onStop}
+              className="px-4 py-2.5 bg-red-500/20 hover:bg-red-500/30 border border-red-500/50 text-red-200 transition rounded-xl font-medium"
+              title="Stop the running benchmark"
+            >
+              ■ Stop
+            </button>
+          )}
         </div>
       </form>
 
@@ -151,8 +190,14 @@ export default function BenchmarkPage() {
       )}
 
       {/* Results */}
-      {status?.state === 'done' && status.result && (
-        <ResultsCard status={status} />
+      {(status?.state === 'done' || status?.state === 'stopped') && status.result && (
+        <ResultsCard status={status} stopped={status.state === 'stopped'} />
+      )}
+
+      {status?.state === 'stopped' && !status.result && (
+        <div className="mt-6 max-w-3xl mx-auto card p-5 border-yellow-500/30 text-yellow-200">
+          Benchmark stopped before collecting samples.
+        </div>
       )}
 
       {status?.state === 'failed' && (
@@ -190,7 +235,7 @@ function NumberField({ label, value, onChange, min, max, hint }: NumberFieldProp
   );
 }
 
-function ResultsCard({ status }: { status: BenchmarkStatus }) {
+function ResultsCard({ status, stopped }: { status: BenchmarkStatus; stopped?: boolean }) {
   const r = status.result!;
 
   // Sort buckets: standard:* first, then turbo:* (just for visual stability).
@@ -200,7 +245,14 @@ function ResultsCard({ status }: { status: BenchmarkStatus }) {
     <section className="mt-8 max-w-5xl mx-auto">
       <header className="flex items-end justify-between mb-3">
         <div>
-          <h2 className="font-display text-2xl font-bold">Results</h2>
+          <h2 className="font-display text-2xl font-bold flex items-center gap-2">
+            Results
+            {stopped && (
+              <span className="pill text-xs bg-yellow-500/15 text-yellow-200 border border-yellow-500/40">
+                stopped early
+              </span>
+            )}
+          </h2>
           <p className="text-sm text-ink-400 mt-0.5">
             {r.total_requests.toLocaleString()} requests · {r.aggregate_rps} req/s ·{' '}
             {r.total_errors} errors · {r.elapsed_s.toFixed(1)}s elapsed

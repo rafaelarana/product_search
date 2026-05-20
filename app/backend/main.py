@@ -274,11 +274,28 @@ def benchmark_start(cfg: BenchmarkConfig) -> BenchmarkStartResponse:
     return BenchmarkStartResponse(job_id=job.job_id)
 
 
+@app.get("/api/benchmark/current")
+def benchmark_current() -> dict[str, str | None]:
+    """Return the in-flight job_id (or null) so the UI can resume on reload."""
+    job = loadgen.current_running_job()
+    return {"job_id": job.job_id if job else None}
+
+
 @app.get("/api/benchmark/{job_id}", response_model=BenchmarkStatus)
 def benchmark_status(job_id: str) -> BenchmarkStatus:
     job = loadgen.get_job(job_id)
     if not job:
         raise HTTPException(404, f"job {job_id} not found")
+    return loadgen.job_status(job)
+
+
+@app.post("/api/benchmark/{job_id}/stop", response_model=BenchmarkStatus)
+async def benchmark_stop(job_id: str) -> BenchmarkStatus:
+    job = loadgen.get_job(job_id)
+    if not job:
+        raise HTTPException(404, f"job {job_id} not found")
+    if job.state == "running":
+        await loadgen.stop_job(job_id)
     return loadgen.job_status(job)
 
 

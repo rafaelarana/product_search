@@ -143,7 +143,7 @@ export interface BenchmarkResult {
 
 export interface BenchmarkStatus {
   job_id: string;
-  state: 'running' | 'done' | 'failed';
+  state: 'running' | 'done' | 'failed' | 'stopped';
   started_at: number;
   elapsed_s: number;
   config: BenchmarkConfig;
@@ -168,5 +168,17 @@ export async function startBenchmark(cfg: BenchmarkConfig): Promise<{ job_id: st
 export async function getBenchmarkStatus(jobId: string): Promise<BenchmarkStatus> {
   const res = await fetch(`${base}/api/benchmark/${jobId}`);
   if (!res.ok) throw new Error(`status failed: ${res.status}`);
+  return res.json();
+}
+
+export async function stopBenchmark(jobId: string): Promise<BenchmarkStatus> {
+  const res = await fetch(`${base}/api/benchmark/${jobId}/stop`, { method: 'POST' });
+  if (!res.ok) throw new Error(`stop failed: ${res.status}`);
+  return res.json();
+}
+
+export async function getCurrentBenchmark(): Promise<{ job_id: string | null }> {
+  const res = await fetch(`${base}/api/benchmark/current`);
+  if (!res.ok) throw new Error(`current failed: ${res.status}`);
   return res.json();
 }

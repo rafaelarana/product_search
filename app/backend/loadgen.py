@@ -145,7 +145,7 @@ class BenchmarkConfig(BaseModel):
     limit: int = Field(20, ge=1, le=50)
 
 
-JobState = Literal["running", "done", "failed"]
+JobState = Literal["running", "done", "failed", "stopped"]
 
 
 class BucketStats(BaseModel):
@@ -208,6 +208,7 @@ class _Job:
 
 
 _jobs: dict[str, _Job] = {}
+_current_job_id: str | None = None
 
 
 def get_job(job_id: str) -> _Job | None:
@@ -216,6 +217,29 @@ def get_job(job_id: str) -> _Job | None:
 
 def any_running() -> bool:
     return any(j.state == "running" for j in _jobs.values())
+
+
+def current_running_job() -> _Job | None:
+    """Return the in-flight job, if any. Used by the UI to recover state."""
+    if _current_job_id is None:
+        return None
+    job = _jobs.get(_current_job_id)
+    if job is None or job.state != "running":
+        return None
+    return job
+
+
+async def stop_job(job_id: str) -> bool:
+    """Cancel the asyncio task backing a running job. Returns True if stopped."""
+    job = _jobs.get(job_id)
+    if job is None or job.state != "running" or job.task is None:
+        return False
+    job.task.cancel()
+    try:
+        await job.task
+    except (asyncio.CancelledError, Exception):
+        pass
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -325,12 +349,15 @@ def _build_result(cfg: BenchmarkConfig, samples: list[_Sample], elapsed_s: float
 
 
 async def _run_job(job: _Job, base_url: str) -> None:
+    global _current_job_id
     cfg = job.config
     samples: list[_Sample] = []
     started = time.perf_counter()
     deadline = asyncio.get_event_loop().time() + cfg.duration_s
 
     progress_task: asyncio.Task | None = None
+    cancelled = False
+    failure: Exception | None = None
 
     async def update_progress() -> None:
         while True:
@@ -348,12 +375,20 @@ async def _run_job(job: _Job, base_url: str) -> None:
                 asyncio.create_task(_worker(client, deadline, cfg, samples))
                 for _ in range(cfg.workers)
             ]
-            await asyncio.gather(*workers)
+            try:
+                await asyncio.gather(*workers)
+            except asyncio.CancelledError:
+                cancelled = True
+                for w in workers:
+                    w.cancel()
+                # Drain so we don't leak.
+                await asyncio.gather(*workers, return_exceptions=True)
+                raise
+    except asyncio.CancelledError:
+        cancelled = True
     except Exception as e:  # pragma: no cover
         log.exception("benchmark job failed")
-        job.error = str(e)
-        job.state = "failed"
-        return
+        failure = e
     finally:
         if progress_task:
             progress_task.cancel()
@@ -364,20 +399,38 @@ async def _run_job(job: _Job, base_url: str) -> None:
 
     elapsed = time.perf_counter() - started
     job.elapsed_s = round(elapsed, 2)
-    job.result = _build_result(cfg, samples, elapsed)
-    job.state = "done"
-    log.info(
-        "benchmark %s done: %d reqs / %.1f rps / p50=%.1f p99=%.1f",
-        job.job_id, job.result.total_requests, job.result.aggregate_rps,
-        job.result.aggregate.p50_ms, job.result.aggregate.p99_ms,
-    )
+
+    # Always compute partial results from whatever samples we got.
+    if samples:
+        job.result = _build_result(cfg, samples, elapsed)
+
+    if cancelled:
+        job.state = "stopped"
+        log.info("benchmark %s stopped after %.1fs (%d samples)",
+                 job.job_id, elapsed, len(samples))
+    elif failure is not None:
+        job.state = "failed"
+        job.error = str(failure)
+    else:
+        job.state = "done"
+        if job.result:
+            log.info(
+                "benchmark %s done: %d reqs / %.1f rps / p50=%.1f p99=%.1f",
+                job.job_id, job.result.total_requests, job.result.aggregate_rps,
+                job.result.aggregate.p50_ms, job.result.aggregate.p99_ms,
+            )
+
+    if _current_job_id == job.job_id:
+        _current_job_id = None
 
 
 def start_job(cfg: BenchmarkConfig, base_url: str = "http://127.0.0.1:8000") -> _Job:
+    global _current_job_id
     if any_running():
         raise RuntimeError("a benchmark is already running")
     job = _Job(job_id=uuid.uuid4().hex[:12], config=cfg)
     _jobs[job.job_id] = job
+    _current_job_id = job.job_id
     job.task = asyncio.create_task(_run_job(job, base_url=base_url))
     return job
 
