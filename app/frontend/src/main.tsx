@@ -11,8 +11,12 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <BrowserRouter>
       <Routes>
         <Route element={<App />}>
-          <Route path="/" element={<SearchPage />} />
-          <Route path="/product/:id" element={<ProductPage />} />
+          {/* Standard mode */}
+          <Route path="/" element={<SearchPage mode="standard" />} />
+          <Route path="/product/:id" element={<ProductPage mode="standard" />} />
+          {/* Turbo mode (LRU embed cache + precomputed similars) */}
+          <Route path="/turbo" element={<SearchPage mode="turbo" />} />
+          <Route path="/turbo/product/:id" element={<ProductPage mode="turbo" />} />
         </Route>
       </Routes>
     </BrowserRouter>

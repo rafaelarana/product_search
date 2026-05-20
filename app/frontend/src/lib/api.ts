@@ -14,6 +14,7 @@ export interface SearchResponse {
   db_ms: number;
   total_ms: number;
   mode: 'semantic' | 'hybrid';
+  cache_hit?: boolean;
 }
 
 export interface ProductDetail {
@@ -32,15 +33,30 @@ export interface ClassFacet {
   n: number;
 }
 
+export type AppMode = 'standard' | 'turbo';
+
 const base = '';
 
-export async function search(params: {
-  q: string;
-  mode: 'semantic' | 'hybrid';
-  product_class?: string | null;
-  limit?: number;
-}): Promise<SearchResponse> {
-  const res = await fetch(`${base}/api/search`, {
+function searchPath(appMode: AppMode): string {
+  return appMode === 'turbo' ? '/api/search/fast' : '/api/search';
+}
+
+function similarPath(productId: number, appMode: AppMode): string {
+  return appMode === 'turbo'
+    ? `/api/product/${productId}/similar/fast`
+    : `/api/product/${productId}/similar`;
+}
+
+export async function search(
+  params: {
+    q: string;
+    mode: 'semantic' | 'hybrid';
+    product_class?: string | null;
+    limit?: number;
+  },
+  appMode: AppMode = 'standard',
+): Promise<SearchResponse> {
+  const res = await fetch(`${base}${searchPath(appMode)}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -60,8 +76,12 @@ export async function getProduct(id: number): Promise<ProductDetail> {
   return res.json();
 }
 
-export async function getSimilar(id: number, limit = 8): Promise<SearchHit[]> {
-  const res = await fetch(`${base}/api/product/${id}/similar?limit=${limit}`);
+export async function getSimilar(
+  id: number,
+  limit = 8,
+  appMode: AppMode = 'standard',
+): Promise<SearchHit[]> {
+  const res = await fetch(`${base}${similarPath(id, appMode)}?limit=${limit}`);
   if (!res.ok) throw new Error(`similar failed`);
   return res.json();
 }
@@ -69,5 +89,19 @@ export async function getSimilar(id: number, limit = 8): Promise<SearchHit[]> {
 export async function listClasses(): Promise<ClassFacet[]> {
   const res = await fetch(`${base}/api/classes?limit=30`);
   if (!res.ok) throw new Error('classes failed');
+  return res.json();
+}
+
+export interface CacheStats {
+  size: number;
+  maxsize: number;
+  hits: number;
+  misses: number;
+  hit_ratio_pct: number;
+}
+
+export async function getCacheStats(): Promise<CacheStats> {
+  const res = await fetch(`${base}/api/cache/stats`);
+  if (!res.ok) throw new Error('cache stats failed');
   return res.json();
 }

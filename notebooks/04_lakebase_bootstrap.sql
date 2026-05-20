@@ -233,3 +233,66 @@ BEGIN
     WHERE p.product_id = p_product_id;
 END;
 $$ LANGUAGE plpgsql STABLE;
+
+-- ============================================================================
+-- 4. TURBO MODE — precomputed neighbors for "similar products"
+-- ============================================================================
+-- Materialize the top-20 nearest neighbors for every product once. /similar
+-- becomes a PK lookup + array unnest instead of an HNSW scan + embedding
+-- fetch. ~30s to build for 43K rows.
+--
+-- The /search "Turbo" path is implemented entirely in the app layer (LRU
+-- cache around the embedding call) and reuses the existing search functions,
+-- so no SQL change is needed for it.
+-- ============================================================================
+
+DROP MATERIALIZED VIEW IF EXISTS lumen_gold.similar_top_k CASCADE;
+
+CREATE MATERIALIZED VIEW lumen_gold.similar_top_k AS
+SELECT
+    p.product_id,
+    ARRAY(
+        SELECT q.product_id
+        FROM lumen_gold.products_mv q
+        WHERE q.product_id <> p.product_id
+        ORDER BY q.embedding <=> p.embedding
+        LIMIT 20
+    ) AS neighbors
+FROM lumen_gold.products_mv p;
+
+CREATE UNIQUE INDEX idx_similar_top_k_pk
+    ON lumen_gold.similar_top_k (product_id);
+
+-- Fast recommender: rank from precomputed array, no HNSW lookup.
+CREATE OR REPLACE FUNCTION recommend_similar_products_fast(
+    p_product_id INT,
+    p_limit INT DEFAULT 10
+) RETURNS TABLE (
+    product_id INT,
+    product_name TEXT,
+    product_class TEXT,
+    average_rating DOUBLE PRECISION,
+    review_count INT,
+    rank INT
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH ranked AS (
+        SELECT n.neighbor_id::INT AS pid, n.ord::INT AS rk
+        FROM lumen_gold.similar_top_k stk
+        CROSS JOIN LATERAL unnest(stk.neighbors[1:p_limit])
+            WITH ORDINALITY AS n(neighbor_id, ord)
+        WHERE stk.product_id = p_product_id
+    )
+    SELECT
+        mv.product_id,
+        mv.product_name,
+        mv.product_class,
+        mv.average_rating,
+        mv.review_count,
+        r.rk
+    FROM ranked r
+    JOIN lumen_gold.products_mv mv ON mv.product_id = r.pid
+    ORDER BY r.rk;
+END;
+$$ LANGUAGE plpgsql STABLE;

@@ -1,28 +1,43 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { getProduct, getSimilar, ProductDetail, SearchHit } from '../lib/api';
+import { AppMode, getProduct, getSimilar, ProductDetail, SearchHit } from '../lib/api';
 import { ProductCard } from '../components/ProductCard';
 
-export default function ProductPage() {
+interface Props {
+  mode: AppMode;
+}
+
+export default function ProductPage({ mode }: Props) {
   const { id } = useParams();
   const productId = Number(id);
   const [product, setProduct] = useState<ProductDetail | null>(null);
   const [similar, setSimilar] = useState<SearchHit[]>([]);
+  const [similarMs, setSimilarMs] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const backTo = mode === 'turbo' ? '/turbo' : '/';
 
   useEffect(() => {
     setProduct(null);
     setSimilar([]);
+    setSimilarMs(null);
     setError(null);
     if (Number.isNaN(productId)) return;
     getProduct(productId).then(setProduct).catch((e) => setError(e.message));
-    getSimilar(productId, 8).then(setSimilar).catch(() => {});
-  }, [productId]);
+
+    const t0 = performance.now();
+    getSimilar(productId, 8, mode)
+      .then((s) => {
+        setSimilar(s);
+        setSimilarMs(Math.round(performance.now() - t0));
+      })
+      .catch(() => {});
+  }, [productId, mode]);
 
   if (error) {
     return (
       <div className="max-w-3xl mx-auto p-10">
-        <Link to="/" className="text-accent-glow text-sm">
+        <Link to={backTo} className="text-accent-glow text-sm">
           ← back to search
         </Link>
         <div className="card p-5 mt-5 text-red-300">{error}</div>
@@ -31,14 +46,12 @@ export default function ProductPage() {
   }
 
   if (!product) {
-    return (
-      <div className="max-w-3xl mx-auto p-10 text-ink-400">Loading…</div>
-    );
+    return <div className="max-w-3xl mx-auto p-10 text-ink-400">Loading…</div>;
   }
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-10">
-      <Link to="/" className="text-accent-glow text-sm">
+      <Link to={backTo} className="text-accent-glow text-sm">
         ← back to search
       </Link>
 
@@ -79,13 +92,28 @@ export default function ProductPage() {
       </section>
 
       <section className="mt-14">
-        <h2 className="font-display text-2xl font-bold mb-1">You might also like</h2>
+        <div className="flex items-end justify-between mb-1">
+          <h2 className="font-display text-2xl font-bold">You might also like</h2>
+          {similarMs != null && (
+            <span
+              className={`pill text-xs font-mono border ${
+                mode === 'turbo'
+                  ? 'bg-lime/15 text-lime border-lime/40'
+                  : 'bg-ink-800 text-ink-300 border-ink-700'
+              }`}
+            >
+              {mode === 'turbo' ? '⚡ precomputed' : 'HNSW'} · <b className="ml-1">{similarMs}ms</b>
+            </span>
+          )}
+        </div>
         <p className="text-ink-400 text-sm mb-6">
-          Nearest neighbours in embedding space · pure pgvector cosine
+          {mode === 'turbo'
+            ? 'Top-K neighbors loaded from a materialized view — no HNSW lookup per request.'
+            : 'Nearest neighbours in embedding space · pure pgvector cosine'}
         </p>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-5">
           {similar.map((h) => (
-            <ProductCard key={h.product_id} hit={h} />
+            <ProductCard key={h.product_id} hit={h} mode={mode} />
           ))}
         </div>
       </section>

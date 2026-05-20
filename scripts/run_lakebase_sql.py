@@ -99,6 +99,7 @@ def main() -> int:
     GRANT EXECUTE ON FUNCTION search_products_semantic(vector, text, int)                       TO "{sp}";
     GRANT EXECUTE ON FUNCTION search_products_hybrid(text, vector, text, int, float, float)     TO "{sp}";
     GRANT EXECUTE ON FUNCTION recommend_similar_products(int, int, boolean)                     TO "{sp}";
+    GRANT EXECUTE ON FUNCTION recommend_similar_products_fast(int, int)                         TO "{sp}";
     GRANT EXECUTE ON FUNCTION list_product_classes(int)                                         TO "{sp}";
     GRANT EXECUTE ON FUNCTION get_product(int)                                                  TO "{sp}";
     """

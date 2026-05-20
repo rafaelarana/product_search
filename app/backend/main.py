@@ -1,4 +1,12 @@
-"""FastAPI backend for the product recommender Databricks App."""
+"""FastAPI backend for the Lumen product recommender Databricks App.
+
+Two parallel API surfaces:
+
+- ``/api/search``                    — Standard mode (BGE-large every call)
+- ``/api/search/fast``               — Turbo mode (LRU-cached embeddings)
+- ``/api/product/{id}/similar``      — Standard recommender (HNSW per call)
+- ``/api/product/{id}/similar/fast`` — Turbo recommender (precomputed neighbors)
+"""
 from __future__ import annotations
 
 import logging
@@ -11,7 +19,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .embed import embed_query
+from .embed import embed_cache, embed_query, embed_query_cached
 from .lakebase import pool
 
 log = logging.getLogger("product_recommender")
@@ -27,7 +35,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     pool.close()
 
 
-app = FastAPI(title="Product Recommender", lifespan=lifespan)
+app = FastAPI(title="Lumen", lifespan=lifespan)
 
 
 # ---------- request/response models ------------------------------------------
@@ -56,6 +64,7 @@ class SearchResponse(BaseModel):
     db_ms: int
     total_ms: int
     mode: str
+    cache_hit: bool = False  # only set by Turbo mode
 
 
 class ProductDetail(BaseModel):
@@ -74,47 +83,24 @@ class ClassFacet(BaseModel):
     n: int
 
 
-# ---------- endpoints --------------------------------------------------------
+# ---------- shared helpers ---------------------------------------------------
 
 
-@app.get("/api/healthz")
-def healthz() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.get("/api/classes", response_model=list[ClassFacet])
-def list_classes(limit: int = 50) -> list[ClassFacet]:
-    with pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM list_product_classes(%s)", [limit])
-        rows = cur.fetchall()
-    return [ClassFacet(product_class=r["product_class"], n=r["n"]) for r in rows]
-
-
-@app.post("/api/search", response_model=SearchResponse)
-def search(req: SearchRequest) -> SearchResponse:
-    t_start = time.perf_counter()
-
-    t_embed = time.perf_counter()
-    qvec = embed_query(req.q)
-    embed_ms = int((time.perf_counter() - t_embed) * 1000)
-
-    t_db = time.perf_counter()
-    with pool.connection() as conn, conn.cursor() as cur:
-        if req.mode == "hybrid":
-            cur.execute(
-                "SELECT * FROM search_products_hybrid(%s, %s::vector(1024), %s, %s)",
-                [req.q, qvec, req.product_class, req.limit],
-            )
-            score_col = "combined_score"
-        else:
-            cur.execute(
-                "SELECT * FROM search_products_semantic(%s::vector(1024), %s, %s)",
-                [qvec, req.product_class, req.limit],
-            )
-            score_col = "similarity"
-        rows = cur.fetchall()
-    db_ms = int((time.perf_counter() - t_db) * 1000)
-
+def _run_search(qvec: list[float], req: SearchRequest, cur) -> tuple[list[SearchHit], str]:
+    """Execute the search SQL function and shape hits. Returns (hits, score_col)."""
+    if req.mode == "hybrid":
+        cur.execute(
+            "SELECT * FROM search_products_hybrid(%s, %s::vector(1024), %s, %s)",
+            [req.q, qvec, req.product_class, req.limit],
+        )
+        score_col = "combined_score"
+    else:
+        cur.execute(
+            "SELECT * FROM search_products_semantic(%s::vector(1024), %s, %s)",
+            [qvec, req.product_class, req.limit],
+        )
+        score_col = "similarity"
+    rows = cur.fetchall()
     hits = [
         SearchHit(
             product_id=r["product_id"],
@@ -127,10 +113,54 @@ def search(req: SearchRequest) -> SearchResponse:
         )
         for r in rows
     ]
+    return hits, score_col
 
-    total_ms = int((time.perf_counter() - t_start) * 1000)
+
+# ---------- endpoints --------------------------------------------------------
+
+
+@app.get("/api/healthz")
+def healthz() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/api/cache/stats")
+def cache_stats() -> dict[str, int]:
+    """Embedding-cache hit/miss counters (Turbo mode visibility)."""
+    return embed_cache.stats()
+
+
+@app.get("/api/classes", response_model=list[ClassFacet])
+def list_classes(limit: int = 50) -> list[ClassFacet]:
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM list_product_classes(%s)", [limit])
+        rows = cur.fetchall()
+    return [ClassFacet(product_class=r["product_class"], n=r["n"]) for r in rows]
+
+
+# --- Standard mode ----------------------------------------------------------
+
+
+@app.post("/api/search", response_model=SearchResponse)
+def search(req: SearchRequest) -> SearchResponse:
+    t_start = time.perf_counter()
+
+    t_embed = time.perf_counter()
+    qvec = embed_query(req.q)
+    embed_ms = int((time.perf_counter() - t_embed) * 1000)
+
+    t_db = time.perf_counter()
+    with pool.connection() as conn, conn.cursor() as cur:
+        hits, _ = _run_search(qvec, req, cur)
+    db_ms = int((time.perf_counter() - t_db) * 1000)
+
     return SearchResponse(
-        hits=hits, embed_ms=embed_ms, db_ms=db_ms, total_ms=total_ms, mode=req.mode
+        hits=hits,
+        embed_ms=embed_ms,
+        db_ms=db_ms,
+        total_ms=int((time.perf_counter() - t_start) * 1000),
+        mode=req.mode,
+        cache_hit=False,
     )
 
 
@@ -161,6 +191,65 @@ def similar(product_id: int, limit: int = 8, same_class: bool = False) -> list[S
             average_rating=r.get("average_rating"),
             review_count=r.get("review_count"),
             score=float(r["similarity"]),
+        )
+        for r in rows
+    ]
+
+
+# --- Turbo mode -------------------------------------------------------------
+
+
+@app.post("/api/search/fast", response_model=SearchResponse)
+def search_fast(req: SearchRequest) -> SearchResponse:
+    """Same as /api/search but uses the LRU embedding cache.
+
+    First call for a given normalized query string still hits Model Serving;
+    every subsequent call returns instantly from in-memory cache.
+    """
+    t_start = time.perf_counter()
+
+    t_embed = time.perf_counter()
+    qvec, cache_hit = embed_query_cached(req.q)
+    embed_ms = int((time.perf_counter() - t_embed) * 1000)
+
+    t_db = time.perf_counter()
+    with pool.connection() as conn, conn.cursor() as cur:
+        hits, _ = _run_search(qvec, req, cur)
+    db_ms = int((time.perf_counter() - t_db) * 1000)
+
+    return SearchResponse(
+        hits=hits,
+        embed_ms=embed_ms,
+        db_ms=db_ms,
+        total_ms=int((time.perf_counter() - t_start) * 1000),
+        mode=req.mode,
+        cache_hit=cache_hit,
+    )
+
+
+@app.get("/api/product/{product_id}/similar/fast", response_model=list[SearchHit])
+def similar_fast(product_id: int, limit: int = 8) -> list[SearchHit]:
+    """Same shape as /similar but reads from the precomputed similar_top_k MV.
+
+    Drops the per-call HNSW lookup; the response score is the rank position
+    (1 = best) rendered as `1 - rank/limit` so the UI score badge still
+    sorts/colors correctly.
+    """
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM recommend_similar_products_fast(%s, %s)",
+            [product_id, limit],
+        )
+        rows = cur.fetchall()
+    return [
+        SearchHit(
+            product_id=r["product_id"],
+            product_name=r["product_name"],
+            product_class=r.get("product_class"),
+            category_hierarchy=None,
+            average_rating=r.get("average_rating"),
+            review_count=r.get("review_count"),
+            score=1.0 - (float(r["rank"]) - 1.0) / max(float(limit), 1.0),
         )
         for r in rows
     ]
