@@ -265,8 +265,14 @@ class BenchmarkStartResponse(BaseModel):
 
 
 @app.post("/api/benchmark/start", response_model=BenchmarkStartResponse)
-def benchmark_start(cfg: BenchmarkConfig) -> BenchmarkStartResponse:
-    """Kick off an async load test against this app's local socket."""
+async def benchmark_start(cfg: BenchmarkConfig) -> BenchmarkStartResponse:
+    """Kick off an async load test against this app's local socket.
+
+    MUST be `async def` so the asyncio.create_task() inside start_job() runs
+    against FastAPI's main event loop. A sync handler would put us in a
+    threadpool worker where create_task can't schedule on a running loop —
+    the task gets created but never executes.
+    """
     try:
         job = loadgen.start_job(cfg)
     except RuntimeError as e:
