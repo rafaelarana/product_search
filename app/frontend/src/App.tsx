@@ -39,6 +39,18 @@ export default function App() {
             >
               <span>⚡</span> Turbo
             </NavLink>
+            <NavLink
+              to="/benchmark"
+              className={({ isActive }) =>
+                `px-4 py-1.5 text-sm rounded-full transition flex items-center gap-1.5 ${
+                  isActive
+                    ? 'bg-ink-100 text-ink-900 font-medium'
+                    : 'text-ink-300 hover:text-ink-100'
+                }`
+              }
+            >
+              <span>🧪</span> Benchmark
+            </NavLink>
           </nav>
         </div>
       </header>

@@ -21,6 +21,8 @@ from pydantic import BaseModel, Field
 
 from .embed import embed_cache, embed_query, embed_query_cached
 from .lakebase import pool
+from . import loadgen
+from .loadgen import BenchmarkConfig, BenchmarkStatus
 
 log = logging.getLogger("product_recommender")
 logging.basicConfig(level=logging.INFO)
@@ -253,6 +255,31 @@ def similar_fast(product_id: int, limit: int = 8) -> list[SearchHit]:
         )
         for r in rows
     ]
+
+
+# --- Benchmark ---------------------------------------------------------------
+
+
+class BenchmarkStartResponse(BaseModel):
+    job_id: str
+
+
+@app.post("/api/benchmark/start", response_model=BenchmarkStartResponse)
+def benchmark_start(cfg: BenchmarkConfig) -> BenchmarkStartResponse:
+    """Kick off an async load test against this app's local socket."""
+    try:
+        job = loadgen.start_job(cfg)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    return BenchmarkStartResponse(job_id=job.job_id)
+
+
+@app.get("/api/benchmark/{job_id}", response_model=BenchmarkStatus)
+def benchmark_status(job_id: str) -> BenchmarkStatus:
+    job = loadgen.get_job(job_id)
+    if not job:
+        raise HTTPException(404, f"job {job_id} not found")
+    return loadgen.job_status(job)
 
 
 # ---------- static frontend --------------------------------------------------

@@ -105,3 +105,68 @@ export async function getCacheStats(): Promise<CacheStats> {
   if (!res.ok) throw new Error('cache stats failed');
   return res.json();
 }
+
+// ---------- Benchmark API ----------
+
+export interface BenchmarkConfig {
+  workers: number;
+  duration_s: number;
+  turbo_pct: number;
+  hybrid_pct: number;
+  limit: number;
+}
+
+export interface BucketStats {
+  name: string;
+  requests: number;
+  errors: number;
+  req_per_s: number;
+  avg_ms: number;
+  min_ms: number;
+  p50_ms: number;
+  p75_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+  max_ms: number;
+}
+
+export interface BenchmarkResult {
+  config: BenchmarkConfig;
+  elapsed_s: number;
+  total_requests: number;
+  total_errors: number;
+  aggregate_rps: number;
+  buckets: BucketStats[];
+  aggregate: BucketStats;
+  status_codes: Record<string, number>;
+}
+
+export interface BenchmarkStatus {
+  job_id: string;
+  state: 'running' | 'done' | 'failed';
+  started_at: number;
+  elapsed_s: number;
+  config: BenchmarkConfig;
+  progress_pct: number;
+  result: BenchmarkResult | null;
+  error: string | null;
+}
+
+export async function startBenchmark(cfg: BenchmarkConfig): Promise<{ job_id: string }> {
+  const res = await fetch(`${base}/api/benchmark/start`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(cfg),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`start failed (${res.status}): ${txt}`);
+  }
+  return res.json();
+}
+
+export async function getBenchmarkStatus(jobId: string): Promise<BenchmarkStatus> {
+  const res = await fetch(`${base}/api/benchmark/${jobId}`);
+  if (!res.ok) throw new Error(`status failed: ${res.status}`);
+  return res.json();
+}

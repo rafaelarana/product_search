@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import App from './App';
 import SearchPage from './pages/Search';
 import ProductPage from './pages/Product';
+import BenchmarkPage from './pages/Benchmark';
 import './styles/index.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
@@ -17,6 +18,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           {/* Turbo mode (LRU embed cache + precomputed similars) */}
           <Route path="/turbo" element={<SearchPage mode="turbo" />} />
           <Route path="/turbo/product/:id" element={<ProductPage mode="turbo" />} />
+          {/* In-app benchmark */}
+          <Route path="/benchmark" element={<BenchmarkPage />} />
         </Route>
       </Routes>
     </BrowserRouter>
