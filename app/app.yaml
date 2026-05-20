@@ -1,0 +1,19 @@
+command:
+  - "uvicorn"
+  - "backend.main:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+
+env:
+  - name: "LAKEBASE_ENDPOINT"
+    value: "projects/ecommerce-search-demo/branches/production/endpoints/primary"
+  - name: "LAKEBASE_DATABASE"
+    value: "appdb"
+  - name: "SERVING_ENDPOINT_EMBEDDING"
+    value: "databricks-bge-large-en"
+  - name: "POOL_MIN_SIZE"
+    value: "1"
+  - name: "POOL_MAX_SIZE"
+    value: "10"

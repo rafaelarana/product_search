@@ -1,0 +1,11 @@
+databricks_profile = "azure-video"
+catalog_name       = "classic_stable_89j9qf"
+
+lakebase_project_id  = "ecommerce-search-demo"
+lakebase_branch_id   = "production"
+lakebase_endpoint_id = "primary"
+lakebase_min_cu      = 0.5
+lakebase_max_cu      = 2.0
+lakebase_app_database = "appdb"
+
+app_name = "lumen-recommender"

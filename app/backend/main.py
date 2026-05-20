@@ -1,0 +1,177 @@
+"""FastAPI backend for the product recommender Databricks App."""
+from __future__ import annotations
+
+import logging
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from .embed import embed_query
+from .lakebase import pool
+
+log = logging.getLogger("product_recommender")
+logging.basicConfig(level=logging.INFO)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # noqa: ARG001
+    pool.open()
+    pool.wait()
+    log.info("Lakebase pool opened")
+    yield
+    pool.close()
+
+
+app = FastAPI(title="Product Recommender", lifespan=lifespan)
+
+
+# ---------- request/response models ------------------------------------------
+
+
+class SearchRequest(BaseModel):
+    q: str = Field(..., min_length=1, max_length=200)
+    mode: str = Field("semantic", pattern="^(semantic|hybrid)$")
+    product_class: str | None = None
+    limit: int = Field(20, ge=1, le=50)
+
+
+class SearchHit(BaseModel):
+    product_id: int
+    product_name: str
+    product_class: str | None
+    category_hierarchy: str | None
+    average_rating: float | None
+    review_count: int | None
+    score: float
+
+
+class SearchResponse(BaseModel):
+    hits: list[SearchHit]
+    embed_ms: int
+    db_ms: int
+    total_ms: int
+    mode: str
+
+
+class ProductDetail(BaseModel):
+    product_id: int
+    product_name: str
+    product_class: str | None
+    category_hierarchy: str | None
+    product_description: str | None
+    product_features: str | None
+    average_rating: float | None
+    review_count: int | None
+
+
+class ClassFacet(BaseModel):
+    product_class: str
+    n: int
+
+
+# ---------- endpoints --------------------------------------------------------
+
+
+@app.get("/api/healthz")
+def healthz() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/api/classes", response_model=list[ClassFacet])
+def list_classes(limit: int = 50) -> list[ClassFacet]:
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM list_product_classes(%s)", [limit])
+        rows = cur.fetchall()
+    return [ClassFacet(product_class=r["product_class"], n=r["n"]) for r in rows]
+
+
+@app.post("/api/search", response_model=SearchResponse)
+def search(req: SearchRequest) -> SearchResponse:
+    t_start = time.perf_counter()
+
+    t_embed = time.perf_counter()
+    qvec = embed_query(req.q)
+    embed_ms = int((time.perf_counter() - t_embed) * 1000)
+
+    t_db = time.perf_counter()
+    with pool.connection() as conn, conn.cursor() as cur:
+        if req.mode == "hybrid":
+            cur.execute(
+                "SELECT * FROM search_products_hybrid(%s, %s::vector(1024), %s, %s)",
+                [req.q, qvec, req.product_class, req.limit],
+            )
+            score_col = "combined_score"
+        else:
+            cur.execute(
+                "SELECT * FROM search_products_semantic(%s::vector(1024), %s, %s)",
+                [qvec, req.product_class, req.limit],
+            )
+            score_col = "similarity"
+        rows = cur.fetchall()
+    db_ms = int((time.perf_counter() - t_db) * 1000)
+
+    hits = [
+        SearchHit(
+            product_id=r["product_id"],
+            product_name=r["product_name"],
+            product_class=r.get("product_class"),
+            category_hierarchy=r.get("category_hierarchy"),
+            average_rating=r.get("average_rating"),
+            review_count=r.get("review_count"),
+            score=float(r[score_col]),
+        )
+        for r in rows
+    ]
+
+    total_ms = int((time.perf_counter() - t_start) * 1000)
+    return SearchResponse(
+        hits=hits, embed_ms=embed_ms, db_ms=db_ms, total_ms=total_ms, mode=req.mode
+    )
+
+
+@app.get("/api/product/{product_id}", response_model=ProductDetail)
+def get_product(product_id: int) -> ProductDetail:
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM get_product(%s)", [product_id])
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(404, f"product {product_id} not found")
+    return ProductDetail(**row)
+
+
+@app.get("/api/product/{product_id}/similar", response_model=list[SearchHit])
+def similar(product_id: int, limit: int = 8, same_class: bool = False) -> list[SearchHit]:
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM recommend_similar_products(%s, %s, %s)",
+            [product_id, limit, same_class],
+        )
+        rows = cur.fetchall()
+    return [
+        SearchHit(
+            product_id=r["product_id"],
+            product_name=r["product_name"],
+            product_class=r.get("product_class"),
+            category_hierarchy=None,
+            average_rating=r.get("average_rating"),
+            review_count=r.get("review_count"),
+            score=float(r["similarity"]),
+        )
+        for r in rows
+    ]
+
+
+# ---------- static frontend --------------------------------------------------
+
+_static_dir = Path(__file__).parent.parent / "frontend" / "dist"
+if _static_dir.exists():
+    app.mount("/assets", StaticFiles(directory=_static_dir / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    def spa_fallback(full_path: str) -> FileResponse:  # noqa: ARG001
+        return FileResponse(_static_dir / "index.html")

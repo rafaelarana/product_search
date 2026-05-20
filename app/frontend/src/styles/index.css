@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    background-image:
+      radial-gradient(60% 50% at 20% 0%, rgba(124, 92, 255, 0.18) 0%, transparent 60%),
+      radial-gradient(50% 40% at 90% 10%, rgba(200, 255, 94, 0.10) 0%, transparent 60%);
+    background-attachment: fixed;
+  }
+  h1, h2, h3 { font-family: 'DM Sans', system-ui, sans-serif; }
+}
+
+@layer components {
+  .pill {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium;
+  }
+  .card {
+    @apply bg-ink-800/70 backdrop-blur border border-ink-700/60 rounded-2xl;
+  }
+  .glow-border {
+    @apply border border-accent/40 shadow-glow;
+  }
+}
