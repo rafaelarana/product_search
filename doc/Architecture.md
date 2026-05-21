@@ -18,7 +18,7 @@
 > | turbo:hybrid        | **18 ms** | **50 ms** | **96 ms**  |
 >
 > Turbo runs at **~169 req/s aggregate** with p99 < 100 ms backend-side on a
-> 0.5–2 CU Lakebase instance.
+> 1–2 CU Lakebase instance.
 
 ---
 
@@ -141,7 +141,7 @@ demo can flip between them tab-by-tab.
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                       SERVING PLANE — LAKEBASE AUTOSCALE                     │
 │             projects/ecommerce-search-demo/branches/production               │
-│                  PG 17 · 0.5–2 CU autoscale · suspend 7d                     │
+│                  PG 17 · 1–2 CU autoscale · suspend 7d                       │
 │                                                                              │
 │   lumen_gold.products_synced  (read-only sink, embedding=jsonb)              │
 │         │                                                                    │
@@ -246,7 +246,7 @@ flowchart LR
         MS --> G
     end
     G -- TRIGGERED sync --> ST[Synced Table<br/>lumen_gold.products_synced<br/>embedding as jsonb]
-    subgraph Lakebase[Lakebase Autoscale · PG17 · 0.5–2 CU]
+    subgraph Lakebase[Lakebase Autoscale · PG17 · 1–2 CU]
         ST -- cast jsonb->vector --> MV[Materialized View<br/>lumen_gold.products_mv<br/>HNSW + GIN]
         MV --> FN[PL/pgSQL serving fns<br/>semantic / hybrid / similar]
     end
@@ -359,7 +359,7 @@ is synchronous by default).
 | Branch | `production` (`is_protected = true`, `no_expiry = true`) |
 | Endpoint | `primary` (`ENDPOINT_TYPE_READ_WRITE`) |
 | PG version | **17** |
-| Autoscale | `autoscaling_limit_min_cu = 0.5`, `max_cu = 2.0` |
+| Autoscale | `autoscaling_limit_min_cu = 1.0`, `max_cu = 2.0` |
 | Suspend | `suspend_timeout_duration = "604800s"` (7 days — effectively always-on for the demo) |
 | DNS | `ep-muddy-math-e154i90y.database.eastus2.azuredatabricks.net` |
 
@@ -371,9 +371,10 @@ is synchronous by default).
 - ✅ `suspend_timeout_duration` field present
 - ❌ NOT `databricks_database_instance` with `capacity = "CU_1"` (that's Provisioned)
 
-On Autoscale, 1 CU ≈ 2 GB RAM. The 0.5–2 CU range gives ~1–4 GB working memory
-which is far more than enough for 43K × 1024-dim float embeddings (~170 MB
-raw, ~300 MB with HNSW overhead).
+On Autoscale, 1 CU ≈ 2 GB RAM. The 1–2 CU range gives 2–4 GB working memory —
+plenty for 43K × 1024-dim float embeddings (~170 MB raw, ~300 MB with HNSW
+overhead) plus working set + Local File Cache headroom. The min was raised
+from 0.5 to 1 CU to keep LFC pressure off the hot path at scale-down.
 
 ### 4.2 Logical database & roles
 
@@ -1100,7 +1101,7 @@ DLT pipeline directly via the Pipelines REST API (UI: pipeline → "Run").
 
 | Item | Driver | Estimate |
 |---|---|---|
-| Lakebase Autoscale 0.5–2 CU, no scale-to-zero | always-on | ~$3.5K–$7K / year |
+| Lakebase Autoscale 1–2 CU, no scale-to-zero | always-on | ~$7K–$14K / year |
 | Model Serving (BGE-large) | pay-per-token, batch + query | dominated by batch (one-time ~few cents for 43K) + ongoing query (cheap) |
 | Databricks App MEDIUM | per-hour app compute | ~$30 / day if always-on |
 | UC storage | tiny — 43K rows ~50 MB | negligible |
