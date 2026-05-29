@@ -1,0 +1,9 @@
+# Python dependencies for the repo-root .venv that Terraform's bootstrap step
+# invokes (terraform/bootstrap.tf → ../.venv/bin/python scripts/run_lakebase_sql.py).
+# These mint an OAuth token via the SDK and execute the Lakebase bootstrap SQL
+# with psycopg. This .venv MUST exist before `terraform apply`.
+#
+# pgvector is included so the same venv can also run the eval harness (eval/).
+databricks-sdk>=0.89.0
+psycopg[binary]>=3.1.0
+pgvector>=0.3.6
